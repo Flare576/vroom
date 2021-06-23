@@ -1,0 +1,263 @@
+#!/bin/zsh
+# 30/08/2018 update - will only switch to a branch if
+# provided as first argument; will warn if changes
+# 10/06/2019 update - branch is now -b
+# 03/09/2019 update - massive overhaul, adding `start:local`, adding project config
+# 03/09/2020 update - annual overhaul
+# 03/09/2021 update - annual overhaul
+# 06/22/2021 update - I realized that I'm basically trying to recreate `make` with
+#   vroom, so I'm retooling vroom as a wrapper for make
+version=11.0.0
+usage="$(basename "$0") [-edhlLrstvw] [targets]
+Uses \`make\` under-the-covers, creating four main parts: destroy, setup, run, watch. Logs to STDOUT unless -l is provided.
+• With no paramters, assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
+• Destroy: generally undoes all the things that Setup does.
+• Setup: Setting up linking, cleaning dist/node_modules, etc. Default is based on language, package manager, etc.
+• Run: Main executor of your project locally. Default is best-guess
+• Watch: Use this to run a long-running 'watch' command. Default is no-op
+• Targets: Feel free to create your own targets in .vroom and use positional arguments!
+
+Custom makefile (.vroom):
+Follow syntax rules for makefile (https://www.gnu.org/software/make/manual/make.html)
+
+Supported auto-configure platforms are
+• Docker / Compose
+• Python (with Pipfile)
+• NPM (with package.json) - Will try to use NVM before commands
+• Yarn (with yarn.lock) - Will try to use NVM before commands
+• PHP/Composer (with composer.json)
+
+Other platforms can still be setup manually; just start with vroom -e
+
+Options:
+  -e edit config
+  -f full run of dsrw
+  -d execute Destroy command
+  -h show this message
+  -l log to server.log or provided -L param
+  -L Change output file (implies -l)
+  -p print config
+  -r execute Run command
+  -s execute Setup command
+  -v Prints version info
+  -w execute Watch command after other operations
+
+Examples: (assumes a NodeJS yarn project, note that 'yarn install' is part of internal Base)
+  vroom: Setup NVM, switch to the right NPM version, execute the RunCmd
+  vroom -l: Setup NVM, switch to the right NPM version, execute the runCmd, log all to 'server.log'
+  vroom -e: Edit .vroom file from current directory
+  vroom -p: Print .vroom file from current directory
+  vroom -s: Setup NVM, switch to the right NPM version, execute the setupCmd
+  vroom -sr: Setup NVM, switch to the right NPM version, execute setupCmd then runCmd
+  vroom -lrs: Setup NVM, switch to the right NPM version, execute setupCmd then runCmd, log all to 'server.log'
+  vroom -d: Setup NVM, switch to the right NPM version, execute the destroyCmd
+  vroom -f: Setup NVM, switch to the right NPM version, execute destroyCmd, execute setupCmd, runCmd, then watchCmd"
+
+base_project() {
+  if [ -d '.git' ]; then
+    changes=$(git diff --name-only)
+  fi
+  files=$(ls -al)
+
+  # Check for project type
+  if [ -f "docker-compose-local.yml" ]; then
+    manager="docker-compose -f docker-compose-local.yml"
+    setup="build"
+  elif [ -f "docker-compose.yml" ]; then
+    manager="docker compose"
+    setup="build"
+  elif [ -f "Dockerfile" ]; then
+    manager="docker"
+    setup="build -t $(basename $(pwd):1) ."
+  elif [[ "$files" =~ "package.json" ]]; then
+    if [[ "$files" =~ ".nvmrc" ]]; then
+      if ! command -v nvm &> /dev/null ; then
+        echo "Found .nvmrc file; wiring up NVM"       # Node w/ NVM/NPM/Yarn/etc.
+        source "$NVM_DIR/nvm.sh" > /dev/null 2>&1     # assume things are wired up normally
+      fi
+      nvm install
+    fi
+    if [[ "$files" =~ "yarn.lock" ]]; then
+      manager="yarn"
+      setup='install'
+    else
+      manager="npm"
+      available=$(npm)
+      if [[ "$available" =~ " ci," ]] && [[ "$files" =~ "package-lock.json" ]]; then
+        setup="ci"
+      else
+        setup="install"
+      fi
+    fi
+  elif [ -f 'composer.json' ]; then
+    # PHP
+    manager="composer"
+    setup="install"
+  elif [ -f 'Pipfile' ]; then
+    # Python
+    manager="pipenv"
+    setup="install"
+  fi
+}
+
+configure_destroy() {
+  if [ -n "$updateConfig" ]; then
+    destroyCmd="echo 'Chill. Have a 🥃'"
+  fi
+}
+
+configure_setup() {
+  if [ -n "$updateConfig" ]; then
+    setupCmd="$manager $setup"
+  fi
+}
+
+configure_run() {
+  if [ -n "$updateConfig" ]; then
+    set_default_run
+  fi
+}
+
+set_default_run() {
+  if [ -f "docker-compose-local.yml" ] || [ -f "docker-compose.yml" ]; then
+    if [ -f "docker-compose-local.yml" ]; then
+      src="docker-compose-local.yml"
+      runCmd="$manager -f docker-compose-local.yml up -d"
+    else
+      runCmd="$manager up -d"
+    fi
+    runCmd="$manager run $target"
+  elif [ -f "Dockerfile" ]; then
+    runCmd="$manager run $(basename $(pwd):1)"
+  elif [ -f "Pipfile" ]; then
+    runCmd="echo \"\e[31;47mCan't predict Python main file! Run \e[32m'vroom -e'\e[31m and set runCmd to your start command!\e[0m\""
+  else
+    # NPM-based projects will return a list of valid commands from the `run` command
+    # checks for, in order, `start:local`, `start:dev`, `dev`, `start` as default
+    scripts=$(eval "$manager run")
+    if [[ "$scripts" =~ '[[:space:]]+start:local[[:space:]]+' ]]; then
+      runCmd="$manager run start:local"
+    elif [[ "$scripts" =~ '[[:space:]]+start:dev[[:space:]]+' ]]; then
+      runCmd="$manager run start:dev"
+    elif [[ "$scripts" =~ '[[:space:]]+dev[[:space:]]+' ]]; then
+      runCmd="$manager run dev"
+    else
+      runCmd="$manager run start"
+    fi
+  fi
+}
+
+configure_watch() {
+  if [ -n "$updateConfig" ]; then
+    watchCmd="echo 'Why not watch a 🥃'"
+  fi
+}
+
+editConfig() {
+  if [ ! -f '.vroom' ]; then
+    echo "none:\ndestroy:\nsetup:\nrun:\nwatch:\n\n# vim: ft=make" | vi -c ":f .vroom" -
+  else
+    vi .vroom
+  fi
+}
+
+while getopts ':hdefpL:lrswv' option; do
+  case "$option" in
+    h) echo "$usage"
+      exit
+      ;;
+    d) doDestroy="true"
+      ;;
+    e) editConfig
+      exit
+      ;;
+    f) doDestroy="true"
+       doRun="true"
+       doSetup="true"
+       doWatch="true"
+      ;;
+    p) cat .vroom
+      exit
+      ;;
+    L) logFile="$OPTARG"
+      ;;
+    l) logToFile="true"
+      ;;
+    r) doRun="true"
+      ;;
+    s) doSetup="true"
+      ;;
+    w) doWatch="true"
+      ;;
+    v) echo "$version"
+      exit
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+if [ -z "$doDestroy" ] && [ -z "$doSetup" ] && [ -z "$doWatch" ] && [ -z "$@" ]; then
+  doRun="true"
+fi
+
+if [ -n "$logToFile" ] || [ -n "$logFile" ]; then
+  if [ -z "$logFile" ]; then
+    logFile="server.log"
+  fi
+  echo "\033[0;31mrun 'less +F $logFile' to see the logs.\033[0m"
+  # holy moly, exec redirects script output!
+  exec > $logFile
+  exec 2>&1
+fi
+# sets changes, files, manager, and setup
+base_project
+
+# Handle updating unchanged branch
+if [ -d ".git" ] && [ -z "$changes" ]; then
+  eval "echo 'no local changes, pulling from origin' $cmdSuffix";
+  git pull > /dev/null 2>&1
+fi
+
+config="$(pwd)/.vroom"
+if ! [ -f "$config" ]; then
+  doSetup="true"
+  updateConfig="true"
+fi
+
+configure_destroy
+configure_setup
+configure_run
+configure_watch
+
+# Write out the config if changed
+if [ -n "$updateConfig" ]; then
+  rm $config &> /dev/null
+  if [ -n "$configComments" ]; then
+    echo "$configComments" >> $config
+  fi
+  echo "none:" >> $config
+  echo "destroy:\n\t$destroyCmd" >> $config
+  echo "setup:\n\t$setupCmd" >> $config
+  echo "run:\n\t$runCmd" >> $config
+  echo "watch:\n\t$watchCmd" >> $config
+  echo "\n# vim: ft=make" >> $config
+fi
+if [[ "$doDestroy" == "true" ]]; then
+  make -f "$config" destroy
+fi
+
+if [[ "$doSetup" == "true" ]]; then
+  make -f "$config" setup
+fi
+
+if [[ "$doRun" == "true" ]]; then
+  make -f "$config" run
+fi
+
+if [[ "$doWatch" == "true" ]]; then
+  make -f "$config" watch
+fi
+
+if [[ -n "$@" ]]; then
+  make -f "$config" "$@"
+fi
