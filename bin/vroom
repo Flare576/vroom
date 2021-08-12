@@ -6,11 +6,12 @@
 # 03/09/2020 update - annual overhaul
 # 03/09/2021 update - annual overhaul
 # 06/22/2021 update - I realized that I'm basically trying to recreate `make` with
+# 08/12/2021 update - Only calls without params will initialize
 #   vroom, so I'm retooling vroom as a wrapper for make
-version=11.0.0
+version=12.0.0
 usage="$(basename "$0") [-edhlLrstvw] [targets]
 Uses \`make\` under-the-covers, creating four main parts: destroy, setup, run, watch. Logs to STDOUT unless -l is provided.
-• With no paramters, assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
+• With no paramters, initializes .vroom or assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
 • Destroy: generally undoes all the things that Setup does.
 • Setup: Setting up linking, cleaning dist/node_modules, etc. Default is based on language, package manager, etc.
 • Run: Main executor of your project locally. Default is best-guess
@@ -196,10 +197,6 @@ while getopts ':hdefpL:lrswv' option; do
 done
 shift $((OPTIND -1))
 
-if [ -z "$doDestroy" ] && [ -z "$doSetup" ] && [ -z "$doWatch" ] && [ -z "$@" ]; then
-  doRun="true"
-fi
-
 if [ -n "$logToFile" ] || [ -n "$logFile" ]; then
   if [ -z "$logFile" ]; then
     logFile="server.log"
@@ -218,10 +215,21 @@ if [ -d ".git" ] && [ -z "$changes" ]; then
   git pull > /dev/null 2>&1
 fi
 
+[ -z "$doDestroy" ] && [ -z "$doSetup" ] && [ -z "$doWatch" ] && [ -z "$@" ] && noflags='true' || noflags=''
+
 config="$(pwd)/.vroom"
-if ! [ -f "$config" ]; then
-  doSetup="true"
-  updateConfig="true"
+if ! [ -f "$config" ] && $noflags; then
+  if [ $noflags ]; then
+    doSetup="true"
+    updateConfig="true"
+  else
+    echo "Please call without arguments/options to initialize."
+    return
+  fi
+fi
+
+if [ $noflags ]; then
+  doRun="true"
 fi
 
 configure_destroy
