@@ -8,7 +8,7 @@
 # 06/22/2021 update - I realized that I'm basically trying to recreate `make` with
 # 08/12/2021 update - Only calls without params will initialize
 #   vroom, so I'm retooling vroom as a wrapper for make
-version=12.0.1
+version=12.0.2
 usage="$(basename "$0") [-edhlLrstvw] [targets]
 Uses \`make\` under-the-covers, creating four main parts: destroy, setup, run, watch. Logs to STDOUT unless -l is provided.
 • With no paramters, initializes .vroom or assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
@@ -124,10 +124,8 @@ set_default_run() {
     if [ -f "docker-compose-local.yml" ]; then
       src="docker-compose-local.yml"
       runCmd="$manager -f docker-compose-local.yml up -d"
-    else
-      runCmd="$manager up -d"
     fi
-    runCmd="$manager run $target"
+    runCmd="$manager up -d"
   elif [ -f "Dockerfile" ]; then
     runCmd="$manager run $(basename $(pwd):1)"
   elif [ -f "Pipfile" ]; then
