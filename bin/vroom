@@ -6,12 +6,12 @@
 # 03/09/2020 update - annual overhaul
 # 03/09/2021 update - annual overhaul
 # 06/22/2021 update - I realized that I'm basically trying to recreate `make` with
-# 08/12/2021 update - Only calls without params will initialize
-#   vroom, so I'm retooling vroom as a wrapper for make
-version=12.0.2
+# 08/12/2021 update - Only calls without params will initialize vroom, so I'm retooling vroom as a wrapper for make
+# 09/06/2022 update - Working on tools with ambiguous file systems, allow expressly defining
+version=12.1.0
 usage="$(basename "$0") [-edhlLrstvw] [targets]
 Uses \`make\` under-the-covers, creating four main parts: destroy, setup, run, watch. Logs to STDOUT unless -l is provided.
-• With no paramters, initializes .vroom or assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
+• With no parameters, initializes .vroom or assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
 • Destroy: generally undoes all the things that Setup does.
 • Setup: Setting up linking, cleaning dist/node_modules, etc. Default is based on language, package manager, etc.
 • Run: Main executor of your project locally. Default is best-guess
@@ -40,11 +40,13 @@ Options:
   -p print config
   -r execute Run command
   -s execute Setup command
+  -t [type] Type of project (compose, compose-local, docker, npm, yarn, python, php)
   -v Prints version info
   -w execute Watch command after other operations
 
-Examples: (assumes a NodeJS yarn project, note that 'yarn install' is part of internal Base)
+Examples:
   vroom: Setup NVM, switch to the right NPM version, execute the RunCmd
+  vroom -t npm: Ignores project files and sets project type to npm, then does the above
   vroom -l: Setup NVM, switch to the right NPM version, execute the runCmd, log all to 'server.log'
   vroom -e: Edit .vroom file from current directory
   vroom -p: Print .vroom file from current directory
@@ -58,46 +60,66 @@ base_project() {
   if [ -d '.git' ]; then
     changes=$(git diff --name-only)
   fi
-  files=$(ls -al)
 
-  # Check for project type
-  if [ -f "docker-compose-local.yml" ]; then
-    manager="docker-compose -f docker-compose-local.yml"
-    setup="build"
-  elif [ -f "docker-compose.yml" ]; then
-    manager="docker compose"
-    setup="build"
-  elif [ -f "Dockerfile" ]; then
+  if [ $type == 'compose-local' ] || [ $type == 'compose' ]; then
+    manager="docker-compose -f docker-$type.yml"
+  elif [ $type == 'docker' ]; then
     manager="docker"
     setup="build -t $(basename $(pwd):1) ."
-  elif [[ "$files" =~ "package.json" ]]; then
-    if [[ "$files" =~ ".nvmrc" ]]; then
+  elif [ $type == 'npm' ] || [ $type == 'yarn' ]; then
+    if [ -f ".nvmrc" ]; then
       if ! command -v nvm &> /dev/null ; then
         echo "Found .nvmrc file; wiring up NVM"       # Node w/ NVM/NPM/Yarn/etc.
         source "$NVM_DIR/nvm.sh" > /dev/null 2>&1     # assume things are wired up normally
       fi
       nvm install
     fi
-    if [[ "$files" =~ "yarn.lock" ]]; then
+    if [ $type == 'yarn' ]; then
       manager="yarn"
       setup='install'
     else
       manager="npm"
       available=$(npm)
-      if [[ "$available" =~ " ci," ]] && [[ "$files" =~ "package-lock.json" ]]; then
+      if [[ "$available" =~ " ci," ]] && [ -f "package-lock.json" ]; then
         setup="ci"
       else
         setup="install"
       fi
     fi
-  elif [ -f 'composer.json' ]; then
+  elif [ $type == 'php' ]; then
     # PHP
     manager="composer"
     setup="install"
-  elif [ -f 'Pipfile' ]; then
+  elif [ $type == 'python' ]; then
     # Python
     manager="pipenv"
     setup="install"
+  fi
+}
+
+configure_type() {
+  modeString=$'^vroom_type *= *([^\n]*)'
+  # If type was passed in, use that
+  if [ -n "$type" ]; then
+    return
+  # Else, if .vroom exists and defines a project type, use it
+  elif [ -f '.vroom' ] && [[ $(<.vroom) =~ $modeString ]]; then
+    type="${BASH_REMATCH[1]}"
+  # Else check for project type
+  elif [ -f "docker-compose-local.yml" ]; then
+    type='compose-local'
+  elif [ -f "docker-compose.yml" ]; then
+    type='compose'
+  elif [ -f "Dockerfile" ]; then
+    type='docker'
+  elif [ -f "yarn.lock" ]; then
+    type='yarn'
+  elif [ -f 'composer.json' ]; then
+    type='php'
+  elif [ -f 'Pipfile' ]; then
+    type='python'
+  else
+    type="npm"
   fi
 }
 
@@ -120,25 +142,28 @@ configure_run() {
 }
 
 set_default_run() {
-  if [ -f "docker-compose-local.yml" ] || [ -f "docker-compose.yml" ]; then
-    if [ -f "docker-compose-local.yml" ]; then
-      src="docker-compose-local.yml"
-      runCmd="$manager -f docker-compose-local.yml up -d"
-    fi
-    runCmd="$manager up -d"
-  elif [ -f "Dockerfile" ]; then
+  if [ $type == 'compose' ] || [ $type == 'compose-local' ]; then
+    runCmd="$manager -f docker-$type.yml up -d"
+  elif [ $type == 'docker' ]; then
     runCmd="$manager run $(basename $(pwd):1)"
-  elif [ -f "Pipfile" ]; then
+  elif [ $type == 'python' ]; then
     runCmd="echo \"\e[31;47mCan't predict Python main file! Run \e[32m'vroom -e'\e[31m and set runCmd to your start command!\e[0m\""
+  elif [ $type == 'php' ]; then
+    # TODO: Verify next time I'm on a Laravel project without Docker...
+    runCmd="$manager artisan serve"
   else
     # NPM-based projects will return a list of valid commands from the `run` command
     # checks for, in order, `start:local`, `start:dev`, `dev`, `start` as default
+    startLocalRegex='[[:space:]]+start:local[[:space:]]+'
+    startDevRegex='[[:space:]]+start:dev[[:space:]]+'
+    devRegex='[[:space:]]dev[[:space:]]+'
     scripts=$(eval "$manager run")
-    if [[ "$scripts" =~ '[[:space:]]+start:local[[:space:]]+' ]]; then
+
+    if [[ "$scripts" =~ $startLocalRegex ]]; then
       runCmd="$manager run start:local"
-    elif [[ "$scripts" =~ '[[:space:]]+start:dev[[:space:]]+' ]]; then
+    elif [[ "$scripts" =~ $startDevRegex ]]; then
       runCmd="$manager run start:dev"
-    elif [[ "$scripts" =~ '[[:space:]]+dev[[:space:]]+' ]]; then
+    elif [[ "$scripts" =~ $devRegex ]]; then
       runCmd="$manager run dev"
     else
       runCmd="$manager run start"
@@ -154,13 +179,13 @@ configure_watch() {
 
 editConfig() {
   if [ ! -f '.vroom' ]; then
-    echo "none:\ndestroy:\nsetup:\nrun:\nwatch:\n\n# vim: ft=make" | vi -c ":f .vroom" -
+    echo "vroom_type = $type\nnone:\ndestroy:\nsetup:\nrun:\nwatch:\n\n# vim: ft=make" | vi -c ":f .vroom" -
   else
     vi .vroom
   fi
 }
 
-while getopts ':hdefpL:lrswv' option; do
+while getopts ':hdefpL:lrst:wv' option; do
   case "$option" in
     h) echo "$usage"
       exit
@@ -186,6 +211,8 @@ while getopts ':hdefpL:lrswv' option; do
       ;;
     s) doSetup="true"
       ;;
+    t) type="$OPTARG"
+      ;;
     w) doWatch="true"
       ;;
     v) echo "$version"
@@ -204,7 +231,9 @@ if [ -n "$logToFile" ] || [ -n "$logFile" ]; then
   exec > $logFile
   exec 2>&1
 fi
-# sets changes, files, manager, and setup
+# Scan file system for clues of what kind or project this is
+configure_type
+# sets changes, manager, and setup
 base_project
 
 # Handle updating unchanged branch
@@ -241,6 +270,7 @@ if [ -n "$updateConfig" ]; then
   if [ -n "$configComments" ]; then
     echo "$configComments" >> $config
   fi
+  echo "vroom_type = $type" >> $config
   echo "none:" >> $config
   echo "destroy:\n\t$destroyCmd" >> $config
   echo "setup:\n\t$setupCmd" >> $config
