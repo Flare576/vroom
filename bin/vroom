@@ -8,7 +8,8 @@
 # 06/22/2021 update - I realized that I'm basically trying to recreate `make` with
 # 08/12/2021 update - Only calls without params will initialize vroom, so I'm retooling vroom as a wrapper for make
 # 09/06/2022 update - Working on tools with ambiguous file systems, allow expressly defining
-version=12.1.0
+# 08/01/2025 update - Adding Claude Code type
+version=12.2.0
 usage="$(basename "$0") [-edhlLrstvw] [targets]
 Uses \`make\` under-the-covers, creating four main parts: destroy, setup, run, watch. Logs to STDOUT unless -l is provided.
 • With no parameters, initializes .vroom or assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
@@ -27,6 +28,7 @@ Supported auto-configure platforms are
 • NPM (with package.json) - Will try to use NVM before commands
 • Yarn (with yarn.lock) - Will try to use NVM before commands
 • PHP/Composer (with composer.json)
+• Claude Code (TBD)
 
 Other platforms can still be setup manually; just start with vroom -e
 
@@ -66,7 +68,7 @@ base_project() {
   elif [ $type == 'docker' ]; then
     manager="docker"
     setup="build -t $(basename $(pwd):1) ."
-  elif [ $type == 'npm' ] || [ $type == 'yarn' ]; then
+  elif [ $type == 'npm' ] || [ $type == 'yarn' ] || [ $type == 'claude' ]; then
     if [ -f ".nvmrc" ]; then
       if ! command -v nvm &> /dev/null ; then
         echo "Found .nvmrc file; wiring up NVM"       # Node w/ NVM/NPM/Yarn/etc.
@@ -74,7 +76,10 @@ base_project() {
       fi
       nvm install
     fi
-    if [ $type == 'yarn' ]; then
+    if [ $type == 'claude' ]; then
+      manager="npm"
+      setup='install -g @anthropic-ai/claude-code'
+    elif [ $type == 'yarn' ]; then
       manager="yarn"
       setup='install'
     else
@@ -106,6 +111,8 @@ configure_type() {
   elif [ -f '.vroom' ] && [[ $(<.vroom) =~ $modeString ]]; then
     type="${BASH_REMATCH[1]}"
   # Else check for project type
+  elif [ -f "CLAUDE.md" ]; then
+    type='claude'
   elif [ -f "docker-compose-local.yml" ]; then
     type='compose-local'
   elif [ -f "docker-compose.yml" ]; then
@@ -142,7 +149,9 @@ configure_run() {
 }
 
 set_default_run() {
-  if [ $type == 'compose' ] || [ $type == 'compose-local' ]; then
+  if [ $type == 'claude' ]; then
+    runCmd="claude"
+  elif [ $type == 'compose' ] || [ $type == 'compose-local' ]; then
     runCmd="$manager -f docker-$type.yml up -d"
   elif [ $type == 'docker' ]; then
     runCmd="$manager run $(basename $(pwd):1)"
