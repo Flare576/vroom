@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # 30/08/2018 update - will only switch to a branch if
 # provided as first argument; will warn if changes
 # 10/06/2019 update - branch is now -b
@@ -9,7 +9,8 @@
 # 08/12/2021 update - Only calls without params will initialize vroom, so I'm retooling vroom as a wrapper for make
 # 09/06/2022 update - Working on tools with ambiguous file systems, allow expressly defining
 # 08/01/2025 update - Adding Claude Code type
-version=12.2.0
+# 09/08/2025 update - Adding uv, revising "python" to "pip"
+version=12.3.0
 usage="$(basename "$0") [-edhlLrstvw] [targets]
 Uses \`make\` under-the-covers, creating four main parts: destroy, setup, run, watch. Logs to STDOUT unless -l is provided.
 • With no parameters, initializes .vroom or assumes -r, if [dsw] then -r is not assumed and must be explicitly requested
@@ -24,11 +25,11 @@ Follow syntax rules for makefile (https://www.gnu.org/software/make/manual/make.
 
 Supported auto-configure platforms are
 • Docker / Compose
-• Python (with Pipfile)
+• Python (with Pipfile or uv)
 • NPM (with package.json) - Will try to use NVM before commands
 • Yarn (with yarn.lock) - Will try to use NVM before commands
 • PHP/Composer (with composer.json)
-• Claude Code (TBD)
+• Claude Code (via NPM w/CLAUDE.md)
 
 Other platforms can still be setup manually; just start with vroom -e
 
@@ -42,7 +43,7 @@ Options:
   -p print config
   -r execute Run command
   -s execute Setup command
-  -t [type] Type of project (compose, compose-local, docker, npm, yarn, python, php)
+  -t [type] Type of project (compose, compose-local, docker, npm, yarn, pip, uv, php)
   -v Prints version info
   -w execute Watch command after other operations
 
@@ -63,23 +64,24 @@ base_project() {
     changes=$(git diff --name-only)
   fi
 
-  if [ $type == 'compose-local' ] || [ $type == 'compose' ]; then
+  if [ "$type" == 'compose-local' ] || [ "$type" == 'compose' ]; then
     manager="docker-compose -f docker-$type.yml"
-  elif [ $type == 'docker' ]; then
+  elif [ "$type" = 'docker' ]; then
     manager="docker"
-    setup="build -t $(basename $(pwd):1) ."
-  elif [ $type == 'npm' ] || [ $type == 'yarn' ] || [ $type == 'claude' ]; then
+    setup="build -t $(basename "$(pwd)":1) ."
+  elif [ "$type" == 'npm' ] || [ "$type" == 'yarn' ] || [ "$type" == 'claude' ]; then
     if [ -f ".nvmrc" ]; then
       if ! command -v nvm &> /dev/null ; then
         echo "Found .nvmrc file; wiring up NVM"       # Node w/ NVM/NPM/Yarn/etc.
+        # shellcheck disable=SC1091
         source "$NVM_DIR/nvm.sh" > /dev/null 2>&1     # assume things are wired up normally
       fi
       nvm install
     fi
-    if [ $type == 'claude' ]; then
+    if [ "$type" == 'claude' ]; then
       manager="npm"
       setup='install -g @anthropic-ai/claude-code'
-    elif [ $type == 'yarn' ]; then
+    elif [ "$type" == 'yarn' ]; then
       manager="yarn"
       setup='install'
     else
@@ -91,12 +93,13 @@ base_project() {
         setup="install"
       fi
     fi
-  elif [ $type == 'php' ]; then
-    # PHP
+  elif [ "$type" == 'php' ]; then
     manager="composer"
     setup="install"
-  elif [ $type == 'python' ]; then
-    # Python
+  elif [ "$type" == 'uv' ]; then
+    manager="uv"
+    setup="sync"
+  elif [ "$type" == 'pip' ]; then
     manager="pipenv"
     setup="install"
   fi
@@ -123,15 +126,19 @@ configure_type() {
     type='yarn'
   elif [ -f 'composer.json' ]; then
     type='php'
+  elif [ -f 'pyproject.toml' ]; then
+    type='uv'
   elif [ -f 'Pipfile' ]; then
-    type='python'
+    type='pip'
   else
     type="npm"
   fi
 }
 
 configure_destroy() {
-  if [ -n "$updateConfig" ]; then
+  if [ "$type" == 'uv' ]; then
+    destroyCmd="rm -rf .venv"
+  elif [ -n "$updateConfig" ]; then
     destroyCmd="echo 'Chill. Have a 🥃'"
   fi
 }
@@ -149,15 +156,23 @@ configure_run() {
 }
 
 set_default_run() {
-  if [ $type == 'claude' ]; then
+  if [ "$type" == 'claude' ]; then
     runCmd="claude"
-  elif [ $type == 'compose' ] || [ $type == 'compose-local' ]; then
+  elif [ "$type" == 'compose' ] || [ "$type" == 'compose-local' ]; then
     runCmd="$manager -f docker-$type.yml up -d"
-  elif [ $type == 'docker' ]; then
-    runCmd="$manager run $(basename $(pwd):1)"
-  elif [ $type == 'python' ]; then
-    runCmd="echo \"\e[31;47mCan't predict Python main file! Run \e[32m'vroom -e'\e[31m and set runCmd to your start command!\e[0m\""
-  elif [ $type == 'php' ]; then
+  elif [ "$type" == 'docker' ]; then
+    runCmd="$manager run $(basename "$(pwd)":1)"
+  elif [ "$type" == 'uv' ]; then
+    if [ -f "main.py" ]; then
+      runCmd="$manager run main.py"
+    elif [ -f "app.py" ]; then
+      runCmd="$manager run app.py"
+    else
+      runCmd="echo \"\033[31;47mCan't predict Python main file! Run \033[32m'vroom -e'\033[31m and set run: to your start command!\033[0m\""
+    fi
+  elif [ "$type" == 'pip' ]; then
+      runCmd="echo \"\033[31;47mCan't predict Python main file! Run \033[32m'vroom -e'\033[31m and set run: to your start command!\033[0m\""
+  elif [ "$type" == 'php' ]; then
     # TODO: Verify next time I'm on a Laravel project without Docker...
     runCmd="$manager artisan serve"
   else
@@ -188,6 +203,7 @@ configure_watch() {
 
 editConfig() {
   if [ ! -f '.vroom' ]; then
+    # shellcheck disable=SC2028
     echo "vroom_type = $type\nnone:\ndestroy:\nsetup:\nrun:\nwatch:\n\n# vim: ft=make" | vi -c ":f .vroom" -
   else
     vi .vroom
@@ -227,6 +243,9 @@ while getopts ':hdefpL:lrst:wv' option; do
     v) echo "$version"
       exit
       ;;
+    *) echo "Unknown Option '$OPTARG', exiting"
+      exit
+      ;;
   esac
 done
 shift $((OPTIND -1))
@@ -235,9 +254,10 @@ if [ -n "$logToFile" ] || [ -n "$logFile" ]; then
   if [ -z "$logFile" ]; then
     logFile="server.log"
   fi
+  # shellcheck disable=2028
   echo "\033[0;31mrun 'less +F $logFile' to see the logs.\033[0m"
   # holy moly, exec redirects script output!
-  exec > $logFile
+  exec > "$logFile"
   exec 2>&1
 fi
 # Scan file system for clues of what kind or project this is
@@ -247,15 +267,15 @@ base_project
 
 # Handle updating unchanged branch
 if [ -d ".git" ] && [ -z "$changes" ]; then
-  eval "echo 'no local changes, pulling from origin' $cmdSuffix";
+  echo "no local changes, pulling from origin";
   git pull > /dev/null 2>&1
 fi
 
-[ -z "$doDestroy" ] && [ -z "$doSetup" ] && [ -z "$doWatch" ] && [ -z "$@" ] && noflags='true' || noflags=''
+[ -z "$doDestroy" ] && [ -z "$doSetup" ] && [ -z "$doWatch" ] && [ -z "$*" ] && noflags='true' || noflags=''
 
 config="$(pwd)/.vroom"
-if ! [ -f "$config" ] && $noflags; then
-  if [ $noflags ]; then
+if ! [ -f "$config" ] && [ -n "$noflags" ]; then
+  if [ -n "$noflags" ]; then
     doSetup="true"
     updateConfig="true"
   else
@@ -264,7 +284,7 @@ if ! [ -f "$config" ] && $noflags; then
   fi
 fi
 
-if [ $noflags ]; then
+if [ -n "$noflags" ]; then
   doRun="true"
 fi
 
@@ -275,17 +295,18 @@ configure_watch
 
 # Write out the config if changed
 if [ -n "$updateConfig" ]; then
-  rm $config &> /dev/null
-  if [ -n "$configComments" ]; then
-    echo "$configComments" >> $config
-  fi
-  echo "vroom_type = $type" >> $config
-  echo "none:" >> $config
-  echo "destroy:\n\t$destroyCmd" >> $config
-  echo "setup:\n\t$setupCmd" >> $config
-  echo "run:\n\t$runCmd" >> $config
-  echo "watch:\n\t$watchCmd" >> $config
-  echo "\n# vim: ft=make" >> $config
+  rm "$config" &> /dev/null
+  printf "vroom_type = %s
+none:
+destroy:
+	%s
+setup:
+	%s
+run:
+	%s
+watch:
+	%s
+# vim: ft=make" "$type" "$destroyCmd" "$setupCmd" "$runCmd" "$watchCmd" > "$config"
 fi
 if [[ "$doDestroy" == "true" ]]; then
   make -f "$config" destroy
@@ -303,6 +324,6 @@ if [[ "$doWatch" == "true" ]]; then
   make -f "$config" watch
 fi
 
-if [[ -n "$@" ]]; then
+if [[ -n "$*" ]]; then
   make -f "$config" "$@"
 fi
